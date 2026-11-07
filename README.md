@@ -1,26 +1,31 @@
-# PM Update Tracker
+# AstraZeneca PM Update Tracker
 
-A web page that lists every Canadian Reference Product (CRP) named in a generic drug submission in Canada, with the CRP's own Notices of Compliance (NOCs), DINs and product details, and whether Apotex holds a NOC for the same product.
+A web page that lists every AstraZeneca product named as the Canadian Reference Product (CRP) in a generic drug submission in Canada. For each one it shows the CRP's own Notices of Compliance (NOCs), DINs and product details, and the generic products filed against it, including whether those generics are on the market.
 
-The data is rebuilt from Health Canada's public APIs every night and published with GitHub Pages.
+The data is rebuilt from Health Canada's public APIs every night and published with GitHub Pages. The same tracker can also run in Databricks, as a notebook or as a Streamlit app (see [Databricks](#databricks)).
 
 ## What the page shows
 
-For each CRP:
+For each AstraZeneca CRP:
 
 - Brand name, company, medicinal ingredients, dosage form, route, product type and therapeutic class
-- The CRP's own NOCs (New Drug Submissions and their supplements) and DINs
+- The CRP's own NOCs (New Drug Submissions and their supplements, including product monograph updates) and DINs
 - Market status from the Drug Product Database (DPD). The page shows active (marketed) CRPs by default.
-- How many generic companies have filed against it
-- The matching Apotex products, DINs and NOCs, and an Apotex status:
+- The generic companies, brands, NOCs and DINs filed against it, and a generic status:
 
 | Status | Meaning |
 |---|---|
-| Apotex NOC on file | An Apotex NOC names this product as its CRP |
-| Same molecule, other CRP | No Apotex NOC names this CRP, but Apotex has a NOC for a product with exactly the same medicinal ingredients |
-| No Apotex NOC | Neither applies |
+| Generic on market | At least one generic DIN that names this CRP is currently marketed |
+| Generic approved, not marketed | No generic DIN is marketed, but at least one is approved or dormant |
+| No active generic | Every generic DIN is cancelled or not in the DPD |
 
-You can filter by words in the **reason for submission** and **reason for supplement**, by product search, by product type and by market status. Select a row to see its full NOC history.
+You can filter by words in the **reason for submission** and **reason for supplement**, by product search, by product type and by market status. Select a row to see its full NOC history, with the current DPD status of every DIN.
+
+### Which products are listed
+
+A CRP is listed when a generic submission names AstraZeneca as the CRP company, or when AstraZeneca holds the CRP's own NOCs. Company names are matched by close spelling against `ASTRAZENECA`, `ZENECA` and `ASTRA PHARMA`, which catches typos such as `ASTRZENECA` and predecessors such as Astra Pharma and Zeneca Pharma. To track another company, change `COMPANY` and `COMPANY_NAMES` at the top of `scripts/build.py` (and in `databricks_app/app.py`).
+
+Generic filers often misspell the CRP name, so one product can appear under several spellings (for example `ARIMIDEX` and `ARIMIIDEX`).
 
 ## Data sources
 
@@ -41,7 +46,7 @@ Inactive NOC records (`noc_active_status` other than 1) are excluded.
 
 ```
 scripts/fetch_data.py   downloads the API data into raw/
-scripts/build.py        joins it into data.json (one record per CRP)
+scripts/build.py        joins it into data.json (one record per AstraZeneca CRP)
 scripts/assemble.py     embeds data.json into src/template.html -> site/index.html
 .github/workflows/publish.yml   runs all three nightly and on every push, then deploys site/ to GitHub Pages
 ```
@@ -57,3 +62,10 @@ python scripts/assemble.py src/template.html data.json site/index.html
 Then open `site/index.html` in a browser.
 
 To refresh the published page without waiting for the nightly run, open the **Actions** tab on GitHub, choose **Refresh data and publish tracker** and select **Run workflow**.
+
+## Databricks
+
+Two single-file versions run the same rules in Databricks:
+
+- **`pm_update_tracker_databricks.py`**: a notebook (import it into a workspace). It downloads the API data into a Unity Catalog volume, builds the tracker, saves the Delta tables `pm_tracker_crps` and `pm_tracker_nocs`, and shows the page. Schedule it as a nightly Job to replace the GitHub workflow.
+- **`databricks_app/app.py`**: a Streamlit app for Databricks Apps that reads the 7 Health Canada tables you already load each day, through a SQL warehouse. Set `TABLES` and `WAREHOUSE_ID` at the top of the file, deploy it as a custom app, and give the app's service principal CAN USE on the warehouse and SELECT on the tables. The table columns are expected to use the API's JSON field names.

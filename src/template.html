@@ -61,9 +61,9 @@ header p { margin: 4px 0 0; color: var(--muted); max-width: 72ch; }
 .stat .v { font: 600 24px/1.1 var(--font-display); font-variant-numeric: tabular-nums; }
 .stat .s { font-size: 12px; color: var(--muted); }
 .stat.all { border-left-color: var(--accent); }
-.stat.filed { border-left-color: var(--ok); }
-.stat.ingredient { border-left-color: var(--warn); }
-.stat.none { border-left-color: var(--no); }
+.stat.market { border-left-color: var(--no); }
+.stat.approved { border-left-color: var(--warn); }
+.stat.none { border-left-color: var(--ok); }
 .bar { display: flex; height: 6px; border-radius: 3px; overflow: hidden; background: var(--sunken); gap: 2px; }
 .bar span { display: block; }
 
@@ -105,9 +105,9 @@ tr.open .caret { transform: rotate(90deg); }
 .dins { display: flex; flex-wrap: wrap; gap: 3px 8px; font-family: var(--font-data); font-size: 12px; }
 .num { font-family: var(--font-data); font-variant-numeric: tabular-nums; }
 .pill { display: inline-block; font-size: 12px; font-weight: 600; padding: 3px 9px; border-radius: 999px; white-space: nowrap; }
-.pill.filed { background: var(--ok-soft); color: var(--ok); }
-.pill.ingredient { background: var(--warn-soft); color: var(--warn); }
-.pill.none { background: var(--no-soft); color: var(--no); }
+.pill.market { background: var(--no-soft); color: var(--no); }
+.pill.approved { background: var(--warn-soft); color: var(--warn); }
+.pill.none { background: var(--ok-soft); color: var(--ok); }
 .mk { display: inline-flex; align-items: center; gap: 5px; font-size: 12px; font-weight: 500; margin-top: 4px; }
 .mk::before { content: ""; width: 7px; height: 7px; border-radius: 50%; background: currentColor; }
 .mk.Marketed { color: var(--ok); }
@@ -147,18 +147,18 @@ tr.detail > td { background: var(--bg); padding: 16px 16px 20px; }
   <header>
     <div>
       <h1>PM Update Tracker</h1>
-      <p>Every Canadian Reference Product (CRP) named in a generic submission, with its own NOCs, DINs and product details, set against Apotex's NOCs for the same product.</p>
+      <p>Every <span class="co"></span> product named as the Canadian Reference Product (CRP) in a generic submission, with its own NOCs, DINs and product details, set against the generic products filed against it.</p>
     </div>
-    <div class="src">Source: Health Canada Notice of Compliance API<br>Data current to <span class="mono" id="asof"></span></div>
+    <div class="src">Source: Health Canada NOC and Drug Product Database<br>Data current to <span class="mono" id="asof"></span></div>
   </header>
 
-  <section class="summary" id="summary" aria-label="Apotex filing status"></section>
+  <section class="summary" id="summary" aria-label="Generic status"></section>
 
   <section class="filters" aria-label="Filters">
     <div class="field">
       <label for="q">Search products</label>
-      <input id="q" type="search" placeholder="CRP name, ingredient, company, DIN or APO- brand" autocomplete="off">
-      <span class="hint">Searches CRP name, company, ingredients, therapeutic class, DINs and Apotex brands.</span>
+      <input id="q" type="search" placeholder="CRP name, ingredient, DIN, generic brand or company" autocomplete="off">
+      <span class="hint">Searches CRP name, ingredients, therapeutic class, DINs, and generic brands, DINs and companies.</span>
     </div>
     <div class="field">
       <label for="rsub">Reason for submission</label>
@@ -174,9 +174,9 @@ tr.detail > td { background: var(--bg); padding: 16px 16px 20px; }
       <div class="field">
         <label for="scope">Apply reason filters to</label>
         <select id="scope">
-          <option value="both">CRP and Apotex NOCs</option>
+          <option value="both">CRP and generic NOCs</option>
           <option value="crp">CRP NOCs only</option>
-          <option value="apo">Apotex NOCs only</option>
+          <option value="gen">Generic NOCs only</option>
         </select>
       </div>
       <div class="field">
@@ -200,8 +200,8 @@ tr.detail > td { background: var(--bg); padding: 16px 16px 20px; }
           <option value="name">CRP name, A to Z</option>
           <option value="filers">Most generic filers</option>
           <option value="latest">Latest CRP NOC</option>
-          <option value="apolatest">Latest Apotex NOC</option>
-          <option value="gap">Unfiled first, most filers</option>
+          <option value="genlatest">Latest generic NOC</option>
+          <option value="gap">Generic on market first, most filers</option>
         </select>
       </div>
       <button class="btn" id="reset" type="button">Clear filters</button>
@@ -224,8 +224,8 @@ tr.detail > td { background: var(--bg); padding: 16px 16px 20px; }
           <th style="width:22%">Product details</th>
           <th style="width:17%">CRP NOC / DIN</th>
           <th style="width:9%">Generic filers</th>
-          <th style="width:22%">Apotex product</th>
-          <th style="width:13%">Apotex status</th>
+          <th style="width:22%">Generic products</th>
+          <th style="width:13%">Generic status</th>
         </tr></thead>
         <tbody id="rows"></tbody>
       </table>
@@ -237,8 +237,9 @@ tr.detail > td { background: var(--bg); padding: 16px 16px 20px; }
   </section>
 
   <section class="note">
-    <p><b>How status is set.</b> <i>Apotex NOC on file</i>: Apotex holds at least one NOC whose submission names this product as its CRP. <i>Same molecule, other CRP</i>: no Apotex NOC names this CRP, but Apotex holds a NOC for a product with exactly the same medicinal ingredients (for example one filed against an older or foreign reference). <i>No Apotex NOC</i>: neither applies.</p>
-    <p><b>CRP market status</b> comes from Health Canada's Drug Product Database (DPD). A CRP is active when at least one of its DINs is currently marketed. Products are matched by DIN first, then by brand name, then by close spelling to catch typos in the CRP names filed with generic submissions. Where a name matches several companies, the CRP company's own products are used. CRPs with no match are listed under "Not found in Drug Product Database". Inactive NOC records are excluded throughout.</p>
+    <p><b>Which products are listed.</b> A CRP is listed when a generic submission names <span class="co"></span> (or a predecessor such as Astra Pharma or Zeneca Pharma, allowing for typos) as the CRP company, or when <span class="co"></span> holds the CRP's own NOCs. Generic filers often misspell the CRP name, so one product can appear under several spellings.</p>
+    <p><b>Generic status</b> uses the current Drug Product Database (DPD) status of the DINs in the generic NOCs that name the CRP. <i>Generic on market</i>: at least one generic DIN is marketed. <i>Generic approved, not marketed</i>: none is marketed, but at least one is approved or dormant. <i>No active generic</i>: every generic DIN is cancelled or not in the DPD.</p>
+    <p><b>CRP market status</b> also comes from the DPD. A CRP is active when at least one of its DINs is currently marketed. Products are matched by DIN first, then by brand name, then by close spelling to catch typos in the CRP names filed with generic submissions. Where a name matches several companies, the CRP company's own products are used. CRPs with no match are listed under "Not found in Drug Product Database". Inactive NOC records are excluded throughout.</p>
     <p><b>Limits.</b> The NOC database lists approved submissions only, so filings still under review do not appear. CRP NOCs are matched by brand name on New Drug Submissions and their supplements. Products approved before 1994 often have no NOC record, and their details are taken from the generic NOCs that reference them.</p>
   </section>
 </div>
@@ -247,26 +248,30 @@ tr.detail > td { background: var(--bg); padding: 16px 16px 20px; }
 <script>
 (() => {
   const D = JSON.parse(document.getElementById('data').textContent);
-  const NOC = D.nocs; // n -> [date, maker, subType, subClass, reasonSub, reasonSupp, conditions, products[[brand,din,ings,form,route]]]
+  const NOC = D.nocs; // n -> [date, maker, subType, subClass, reasonSub, reasonSupp, conditions, products[[brand,din,ings,form,route,dpdStatus]]]
   const CRPS = D.crps;
   const STATUS = {
-    filed: 'Apotex NOC on file',
-    ingredient: 'Same molecule, other CRP',
-    none: 'No Apotex NOC'
+    market: 'Generic on market',
+    approved: 'Generic approved, not marketed',
+    none: 'No active generic'
   };
+  document.querySelectorAll('.co').forEach(e => e.textContent = D.company);
+  document.title = `${D.company} PM Update Tracker`;
+  document.querySelector('h1').textContent = document.title;
   const MARKET = {
     Marketed: 'Active (marketed)', Approved: 'Approved, not marketed', Dormant: 'Dormant',
     Cancelled: 'Cancelled', 'Not found': 'Not found in DPD'
   };
   const PAGE = 50;
+  const dpdClass = s => ['Marketed', 'Approved', 'Dormant'].includes(s) ? s : 'Cancelled';
   const $ = id => document.getElementById(id);
   const esc = s => String(s ?? '').replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
 
   // precompute lowercase search haystacks
   for (const c of CRPS) {
-    c.hay = [c.n, c.co, c.tc, c.ing.join(' '), c.din.join(' '), c.ab.join(' '), c.ad.join(' ')].join(' ').toLowerCase();
+    c.hay = [c.n, c.co, c.tc, c.ing.join(' '), c.din.join(' '), c.gb.join(' '), c.gd.join(' '), c.gc.join(' ')].join(' ').toLowerCase();
     c.latest = c.own.length ? NOC[c.own[c.own.length - 1]][0] : '';
-    c.apoLatest = c.apo.length ? NOC[c.apo[c.apo.length - 1]][0] : '';
+    c.genLatest = c.gen.length ? NOC[c.gen[c.gen.length - 1]][0] : '';
   }
   const lc = {};
   for (const n in NOC) lc[n] = [NOC[n][4].toLowerCase(), NOC[n][5].toLowerCase()];
@@ -312,7 +317,7 @@ tr.detail > td { background: var(--bg); padding: 16px 16px 20px; }
   let view = [], qSub = [], qSupp = [], qText = [];
 
   function nocPool(c, scope) {
-    return scope === 'crp' ? c.own : scope === 'apo' ? c.apo : c.own.concat(c.apo);
+    return scope === 'crp' ? c.own : scope === 'gen' ? c.gen : c.own.concat(c.gen);
   }
   function filterBase() {
     qText = parse($('q').value.replace(/,/g, ' '));
@@ -334,12 +339,12 @@ tr.detail > td { background: var(--bg); padding: 16px 16px 20px; }
     name: (a, b) => a.n.localeCompare(b.n),
     filers: (a, b) => b.gm - a.gm || a.n.localeCompare(b.n),
     latest: (a, b) => b.latest.localeCompare(a.latest) || a.n.localeCompare(b.n),
-    apolatest: (a, b) => b.apoLatest.localeCompare(a.apoLatest) || a.n.localeCompare(b.n),
-    gap: (a, b) => (a.st === 'none' ? 0 : a.st === 'ingredient' ? 1 : 2) - (b.st === 'none' ? 0 : b.st === 'ingredient' ? 1 : 2) || b.gm - a.gm
+    genlatest: (a, b) => b.genLatest.localeCompare(a.genLatest) || a.n.localeCompare(b.n),
+    gap: (a, b) => (a.st === 'market' ? 0 : a.st === 'approved' ? 1 : 2) - (b.st === 'market' ? 0 : b.st === 'approved' ? 1 : 2) || b.gm - a.gm
   };
 
   function renderSummary(base) {
-    const cnt = { filed: 0, ingredient: 0, none: 0 };
+    const cnt = { market: 0, approved: 0, none: 0 };
     base.forEach(c => cnt[c.st]++);
     const tot = base.length || 1;
     const pct = k => Math.round(cnt[k] / tot * 100);
@@ -347,9 +352,9 @@ tr.detail > td { background: var(--bg); padding: 16px 16px 20px; }
       <span class="k">${label}</span><span class="v">${v.toLocaleString()}</span><span class="s">${sub}</span></button>`;
     $('summary').innerHTML =
       tile('', 'CRP products', base.length, `<span class="bar" aria-hidden="true">
-        <span style="width:${pct('filed')}%;background:var(--ok)"></span><span style="width:${pct('ingredient')}%;background:var(--warn)"></span><span style="width:${pct('none')}%;background:var(--no)"></span></span>`) +
-      tile('filed', STATUS.filed, cnt.filed, `${pct('filed')}% of CRPs shown`) +
-      tile('ingredient', STATUS.ingredient, cnt.ingredient, `${pct('ingredient')}% of CRPs shown`) +
+        <span style="width:${pct('market')}%;background:var(--no)"></span><span style="width:${pct('approved')}%;background:var(--warn)"></span><span style="width:${pct('none')}%;background:var(--ok)"></span></span>`) +
+      tile('market', STATUS.market, cnt.market, `${pct('market')}% of CRPs shown`) +
+      tile('approved', STATUS.approved, cnt.approved, `${pct('approved')}% of CRPs shown`) +
       tile('none', STATUS.none, cnt.none, `${pct('none')}% of CRPs shown`);
   }
 
@@ -358,7 +363,7 @@ tr.detail > td { background: var(--bg); padding: 16px 16px 20px; }
   function rowHtml(c) {
     const terms = allTerms(qText);
     const lastOwn = c.own.length ? c.own[c.own.length - 1] : null;
-    const lastApo = c.apo.length ? c.apo[c.apo.length - 1] : null;
+    const lastGen = c.gen.length ? c.gen[c.gen.length - 1] : null;
     const open = state.open.has(c.n);
     const details = [c.fm.join(', '), c.rt.join(', ')].filter(Boolean).join(' · ');
     return `<tr class="crp${open ? ' open' : ''}" data-n="${esc(c.n)}" tabindex="0" aria-expanded="${open}">
@@ -371,10 +376,10 @@ tr.detail > td { background: var(--bg); padding: 16px 16px 20px; }
       <td>${lastOwn ? `<div><span class="num">NOC ${lastOwn}</span> <span class="sub">${NOC[lastOwn][0]}</span></div>
         <div class="sub">${c.own.length} NOC${c.own.length > 1 ? 's' : ''} on record</div>` : '<div class="sub">No CRP NOC on record (pre-1994 or foreign)</div>'}
         ${c.din.length ? `<div class="dins">${more(c.din, 4, d => `<span>${hl(d, terms)}</span>`)}</div>` : ''}</td>
-      <td><div class="num">${c.gm}</div><div class="sub">${c.gn} generic NOCs</div></td>
-      <td>${c.ab.length ? `<div class="ing">${more(c.ab, 2, b => `<div>${hl(b, terms)}</div>`)}</div>` : '<div class="sub">—</div>'}
-        ${lastApo ? `<div class="sub"><span class="num">NOC ${lastApo}</span> · ${NOC[lastApo][0]} · ${c.apo.length} NOC${c.apo.length > 1 ? 's' : ''}</div>` : ''}
-        ${c.ad.length ? `<div class="dins">${more(c.ad, 4, d => `<span>${hl(d, terms)}</span>`)}</div>` : ''}</td>
+      <td><div class="num">${c.gm}</div><div class="sub">${c.gn} generic NOC${c.gn === 1 ? '' : 's'}</div></td>
+      <td>${c.gb.length ? `<div class="ing">${more(c.gb, 2, b => `<div>${hl(b, terms)}</div>`)}</div>` : '<div class="sub">—</div>'}
+        ${lastGen ? `<div class="sub">Latest <span class="num">NOC ${lastGen}</span> · ${NOC[lastGen][0]}</div>` : ''}
+        <div class="sub">${c.gdm.length} of ${c.gd.length} generic DIN${c.gd.length === 1 ? '' : 's'} marketed</div></td>
       <td><span class="pill ${c.st}">${STATUS[c.st]}</span></td>
     </tr>${open ? detailHtml(c) : ''}`;
   }
@@ -386,7 +391,7 @@ tr.detail > td { background: var(--bg); padding: 16px 16px 20px; }
     const rows = list.slice().reverse().map(n => {
       const r = NOC[n];
       const hit = active && ((qSub.length && matches(lc[n][0], qSub)) || (qSupp.length && matches(lc[n][1], qSupp)));
-      const prods = r[7].length ? r[7].map(p => `<div>${esc(p[0])} · <span class="num">${p[1] || 'no DIN'}</span> · ${esc(p[2] || '')}${p[3] ? ' · ' + esc(p[3]) : ''}</div>`).join('') : '<span class="muted">—</span>';
+      const prods = r[7].length ? r[7].map(p => `<div>${esc(p[0])} · <span class="num">${p[1] || 'no DIN'}</span> · ${esc(p[2] || '')}${p[3] ? ' · ' + esc(p[3]) : ''}${p[5] ? ` · <span class="mk ${dpdClass(p[5])}">${esc(p[5])}</span>` : ''}</div>`).join('') : '<span class="muted">—</span>';
       return `<tr class="${active ? (hit ? 'hit' : 'dim') : ''}">
         <td class="num">${n}</td><td class="num" style="white-space:nowrap">${r[0]}</td>
         <td>${esc(r[2])}<div class="sub">${esc(r[3])}${r[6] === 'Y' ? ' · with conditions' : ''}</div><div class="sub">${esc(r[1])}</div></td>
@@ -399,20 +404,20 @@ tr.detail > td { background: var(--bg); padding: 16px 16px 20px; }
 
   function detailHtml(c) {
     const scope = $('scope').value;
-    const apoTitle = c.st === 'ingredient' ? 'Apotex NOCs for the same ingredients (filed against another CRP)' : 'Apotex NOCs referencing this CRP';
     return `<tr class="detail"><td colspan="6"><div class="detail-grid">
       <div class="detail-head">
         <span><b>CRP company</b> ${esc(c.co)}${c.ct ? ' (' + esc(c.ct) + ')' : ''}</span>
         <span><b>CRP DINs</b> <span class="mono">${c.din.length ? esc(c.din.join(', ')) : 'none on record'}</span></span>
-        <span><b>Apotex DINs</b> <span class="mono">${c.ad.length ? esc(c.ad.join(', ')) : 'none'}</span></span>
+        <span><b>Generic DINs marketed</b> <span class="mono">${c.gdm.length ? esc(c.gdm.join(', ')) : 'none'}</span></span>
         <span><b>First generic NOC</b> <span class="mono">${esc(c.first)}</span></span>
       </div>
+      <div class="detail-head"><span><b>Generic companies (${c.gc.length})</b> ${esc(c.gc.join(' · '))}</span></div>
       <div><div class="sec-title"><h2>CRP in the Drug Product Database</h2><span class="hint">${c.mp.length ? 'Matched by ' + esc(c.mh) : 'No matching product found'}</span></div>
         ${c.mp.length ? `<div style="overflow-x:auto"><table class="nocs"><thead><tr><th>DIN</th><th>Brand name</th><th>Current status</th><th>Company</th></tr></thead><tbody>${
-          c.mp.map(p => `<tr><td class="num">${esc(p[0])}</td><td>${esc(p[1])}</td><td><span class="mk ${p[2] === 'Marketed' ? 'Marketed' : p[2] === 'Approved' ? 'Approved' : p[2] === 'Dormant' ? 'Dormant' : 'Cancelled'}">${esc(p[2])}</span></td><td>${esc(p[3])}</td></tr>`).join('')
+          c.mp.map(p => `<tr><td class="num">${esc(p[0])}</td><td>${esc(p[1])}</td><td><span class="mk ${dpdClass(p[2])}">${esc(p[2])}</span></td><td>${esc(p[3])}</td></tr>`).join('')
         }</tbody></table></div>` : '<div class="sub">The CRP name did not match any DIN or brand name in the DPD.</div>'}</div>
-      <div><div class="sec-title"><h2>CRP NOCs</h2><span class="hint">${c.own.length} on record, newest first</span></div>${nocTable(c.own, scope !== 'apo')}</div>
-      <div><div class="sec-title"><h2>${apoTitle}</h2><span class="hint">${c.apo.length} on record, newest first</span></div>${nocTable(c.apo, scope !== 'crp')}</div>
+      <div><div class="sec-title"><h2>CRP NOCs</h2><span class="hint">${c.own.length} on record, newest first</span></div>${nocTable(c.own, scope !== 'gen')}</div>
+      <div><div class="sec-title"><h2>Generic NOCs referencing this CRP</h2><span class="hint">${c.gen.length} on record, newest first · DIN status from the DPD</span></div>${nocTable(c.gen, scope !== 'crp')}</div>
     </div></td></tr>`;
   }
 
@@ -464,9 +469,9 @@ tr.detail > td { background: var(--bg); padding: 16px 16px 20px; }
     state.status = ''; state.open.clear(); update();
   });
   $('copy').addEventListener('click', () => {
-    const head = ['CRP product', 'CRP company', 'Ingredients', 'Dosage form', 'Route', 'Product type', 'CRP market status', 'CRP NOCs', 'Latest CRP NOC', 'CRP DINs', 'Generic filers', 'Apotex brands', 'Apotex NOCs', 'Apotex DINs', 'Apotex status'];
+    const head = ['CRP product', 'CRP company', 'Ingredients', 'Dosage form', 'Route', 'Product type', 'CRP market status', 'CRP NOCs', 'Latest CRP NOC', 'CRP DINs', 'Generic filers', 'Generic companies', 'Generic brands', 'Generic NOCs', 'Latest generic NOC', 'Generic DINs', 'Generic DINs marketed', 'Generic status'];
     const lines = [head.join('\t')].concat(view.map(c => [c.n, c.co, c.ing.join(' + '), c.fm.join(', '), c.rt.join(', '), c.pt, MARKET[c.ms],
-      c.own.join(' '), c.latest, c.din.join(' '), c.gm, c.ab.join(', '), c.apo.join(' '), c.ad.join(' '), STATUS[c.st]].join('\t')));
+      c.own.join(' '), c.latest, c.din.join(' '), c.gm, c.gc.join('; '), c.gb.join(', '), c.gen.join(' '), c.genLatest, c.gd.join(' '), c.gdm.join(' '), STATUS[c.st]].join('\t')));
     const text = lines.join('\n');
     const done = msg => { $('copymsg').textContent = msg; setTimeout(() => $('copymsg').textContent = '', 3000); };
     try {

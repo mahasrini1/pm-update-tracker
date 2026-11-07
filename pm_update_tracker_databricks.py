@@ -1,9 +1,11 @@
 # Databricks notebook source
 # MAGIC %md
-# MAGIC # PM Update Tracker (Databricks)
+# MAGIC # AstraZeneca PM Update Tracker (Databricks)
 # MAGIC
-# MAGIC Lists every Canadian Reference Product (CRP) named in a generic drug submission in Canada, with the CRP's own
-# MAGIC Notices of Compliance (NOCs), DINs and product details, and whether Apotex holds a NOC for the same product.
+# MAGIC Lists every AstraZeneca product named as the Canadian Reference Product (CRP) in a generic drug submission in
+# MAGIC Canada, with the CRP's own Notices of Compliance (NOCs), DINs and product details, set against the generic
+# MAGIC products filed against it and whether those generics are on the market.
+# MAGIC To track another company, change `COMPANY` and `COMPANY_NAMES` in section 2.
 # MAGIC
 # MAGIC This one notebook replaces the GitHub project (`fetch_data.py`, `build.py`, `assemble.py`, `template.html`
 # MAGIC and the nightly GitHub Actions workflow). Running it top to bottom:
@@ -11,7 +13,7 @@
 # MAGIC 1. downloads the Health Canada NOC and Drug Product Database (DPD) API data into a Unity Catalog volume,
 # MAGIC 2. joins it into one record per CRP (same logic as `scripts/build.py`),
 # MAGIC 3. saves the result as Delta tables (`pm_tracker_crps`, `pm_tracker_nocs`) for SQL and dashboards,
-# MAGIC 4. writes the interactive tracker page to the volume as `pm_update_tracker.html` and shows it below the last cell.
+# MAGIC 4. writes the interactive tracker page to the volume as `astrazeneca_pm_update_tracker.html` and shows it below the last cell.
 # MAGIC
 # MAGIC **Nightly refresh:** create a Databricks Job that runs this notebook on the schedule `0 0 9 * * ?` (09:00 UTC,
 # MAGIC after Health Canada's nightly refresh). The cluster needs outbound internet access to `health-products.canada.ca`.
@@ -36,7 +38,7 @@ spark.sql(f"CREATE VOLUME IF NOT EXISTS `{CATALOG}`.`{SCHEMA}`.`{VOLUME}`")
 
 VOLUME_PATH = f"/Volumes/{CATALOG}/{SCHEMA}/{VOLUME}"
 RAW_DIR = f"{VOLUME_PATH}/raw"  # downloaded API JSON (the old raw/ folder)
-HTML_PATH = f"{VOLUME_PATH}/pm_update_tracker.html"  # the old site/index.html
+HTML_PATH = f"{VOLUME_PATH}/astrazeneca_pm_update_tracker.html"  # the old site/index.html
 CRPS_TABLE = f"`{CATALOG}`.`{SCHEMA}`.pm_tracker_crps"
 NOCS_TABLE = f"`{CATALOG}`.`{SCHEMA}`.pm_tracker_nocs"
 print("raw data:", RAW_DIR, "| page:", HTML_PATH, "| tables:", CRPS_TABLE, NOCS_TABLE)
@@ -104,7 +106,7 @@ else:
 # COMMAND ----------
 
 # MAGIC %md
-# MAGIC ## 2. Build one record per CRP (was `scripts/build.py`)
+# MAGIC ## 2. Build one record per AstraZeneca CRP (was `scripts/build.py`)
 
 # COMMAND ----------
 
@@ -112,18 +114,27 @@ import collections as C
 import difflib
 import re
 
+COMPANY = "AstraZeneca"
+# spellings that identify the company (and its predecessors) in NOC company names; matched by close spelling
+COMPANY_NAMES = ["ASTRAZENECA", "ZENECA", "ASTRA PHARMA"]
+
 INNOVATOR_TYPES = {"New Drug Submission", "Supplement to a New"}
 MARKET_ORDER = ["Marketed", "Approved", "Dormant"]
+RANK = {s: i for i, s in enumerate(MARKET_ORDER)}
 FORMWORDS = (r"\b(TABLETS?|CAPLETS?|CAPSULES?|CAPS?|TABS?|LIQUI-?GELS?|INJECTION|INJ|SOLUTION|"
              r"SUSPENSION|CREAM|OINTMENT|SYRUP|ORAL|FOR|XR|SR)\b")
+_COMPANY_KEYS = [re.sub(r"[^A-Z]", "", n) for n in COMPANY_NAMES]
 
 
 def norm(s):
     return re.sub(r"\s+", " ", (s or "").strip().upper())
 
 
-def is_apo(r):
-    return "APOTEX" in r["noc_manufacturer_name"].upper()
+def is_company(name):
+    """True when a company name is the tracked company, allowing typos such as ASTRZENECA or ASTRA ZENECA."""
+    words = re.sub(r"[^A-Z ]", " ", norm(name)).split()
+    cands = words + [a + b for a, b in zip(words, words[1:])]
+    return any(difflib.SequenceMatcher(None, w, k).ratio() >= 0.85 for w in cands for k in _COMPANY_KEYS)
 
 
 def core(s):  # drop strengths such as "50 MG/ML"
@@ -141,32 +152,31 @@ def first_word(s):
     return norm(s).split(" ")[0] if s else ""
 
 
-def build_dataset(d):
-    """Join the raw API downloads in folder d into {"asOf", "crps", "nocs"} (the old data.json)."""
-    load = lambda n: json.load(open(f"{d}/{n}.json", encoding="utf-8"))
-    main = load("noticeofcompliancemain")
+def build(src):
+    # tables have no row order, so fix one: ties below (most common company, product order) stay stable
+    main = sorted(src["noticeofcompliancemain"], key=lambda r: (r["noc_date"], str(r["noc_number"])))
     inactive = {r["noc_number"] for r in main if str(r["noc_active_status"]).strip() != "1"}
     main = [r for r in main if r["noc_number"] not in inactive]  # keep active NOC records only
-    prods = [p for p in load("drugproduct") if p["noc_number"] not in inactive]
-    ingr = load("medicinalingredient")
-    forms = load("dosageform")
-    routes = load("route")
+    prods = sorted((p for p in src["drugproduct"] if p["noc_number"] not in inactive),
+                   key=lambda p: (str(p["noc_number"]), str(p["noc_br_product_id"])))
+    ingr = sorted(src["medicinalingredient"],
+                  key=lambda r: (str(r["noc_pi_din_product_id"]), norm(r["noc_pi_medic_ingr_name"])))
+    dpd_prods = sorted(src["dpd/drugproduct"], key=lambda p: str(p["drug_code"]))
+    dpd_status = {s["drug_code"]: s["status"] for s in src["dpd/status"]}
 
     noc = {r["noc_number"]: r for r in main}
 
-    # product-level lookups
     ing_by_prod = C.defaultdict(list)
     for r in ingr:
         s = r["noc_pi_strength"]
         s = ("%g" % s) if isinstance(s, (int, float)) else (s or "")
         ing_by_prod[r["noc_pi_din_product_id"]].append(
-            (norm(r["noc_pi_medic_ingr_name"]), f"{s} {r['noc_pi_unit'] or ''}".strip())
-        )
+            (norm(r["noc_pi_medic_ingr_name"]), f"{s} {r['noc_pi_unit'] or ''}".strip()))
     form_by_prod = C.defaultdict(set)
-    for r in forms:
+    for r in src["dosageform"]:
         form_by_prod[r["noc_pf_din_product_id"]].add(r["noc_pf_form_name"].strip())
     route_by_prod = C.defaultdict(set)
-    for r in routes:
+    for r in src["route"]:
         route_by_prod[r["noc_pr_din_product_id"]].add(r["noc_pr_route"].strip())
 
     prods_by_noc = C.defaultdict(list)
@@ -175,66 +185,56 @@ def build_dataset(d):
         prods_by_noc[p["noc_number"]].append(p)
         nocs_by_brand[norm(p["noc_br_brandname"])].add(p["noc_number"])
 
+    # current Drug Product Database status of every DIN (a DIN listed twice keeps its most active status)
+    din_status = {}
+    for p in dpd_prods:
+        stat = dpd_status.get(p["drug_code"], "")
+        din = p["drug_identification_number"]
+        if din not in din_status or RANK.get(stat, 9) < RANK.get(din_status[din], 9):
+            din_status[din] = stat
+
     def products(n):
-        """Product rows for one NOC: [brand, din, ingredients, form, route]."""
+        """Product rows for one NOC: [brand, din, ingredients, form, route, DPD status of the DIN]."""
         rows = []
         for p in prods_by_noc.get(n, []):
             pid = p["noc_br_product_id"]
             ings = "; ".join(f"{i} {s}".strip() for i, s in ing_by_prod.get(pid, []))
             din = (p["noc_br_din"] or "").strip()
-            rows.append([
-                p["noc_br_brandname"].strip(),
-                "" if din.upper() in ("N/A", "") else din,
-                ings,
-                ", ".join(sorted(form_by_prod.get(pid, []))),
-                ", ".join(sorted(route_by_prod.get(pid, []))),
-            ])
+            din = "" if din.upper() in ("N/A", "") else din
+            rows.append([p["noc_br_brandname"].strip(), din, ings, ", ".join(sorted(form_by_prod.get(pid, []))),
+                         ", ".join(sorted(route_by_prod.get(pid, []))), din_status.get(din, "")])
         return rows
 
     def ingredient_names(nocs):
-        s = set()
-        for n in nocs:
-            for p in prods_by_noc.get(n, []):
-                for i, _ in ing_by_prod.get(p["noc_br_product_id"], []):
-                    s.add(i)
-        return s
+        return {i for n in nocs for p in prods_by_noc.get(n, []) for i, _ in ing_by_prod.get(p["noc_br_product_id"], [])}
 
-    # group generic submissions by the CRP they reference
-    crp_refs = C.defaultdict(list)
+    crp_refs = C.defaultdict(list)  # generic submissions grouped by the CRP they reference
     for r in main:
         name = norm(r["noc_crp_product_name"])
         if name:
             crp_refs[name].append(r)
 
-    apo_all = [r["noc_number"] for r in main if is_apo(r)]
-    apo_ings = C.defaultdict(set)  # frozenset of ingredients (one product) -> apotex noc numbers
-    for n in apo_all:
-        for p in prods_by_noc.get(n, []):
-            key = frozenset(i for i, _ in ing_by_prod.get(p["noc_br_product_id"], []))
-            if key:
-                apo_ings[key].add(n)
-
-    used_nocs = set()
-    crps = []
+    used_nocs, crps = set(), []
     for name, refs in crp_refs.items():
+        # the CRP's own (innovator) NOCs: brand name matches, NDS / SNDS submission
+        own = sorted((n for n in nocs_by_brand.get(name, ()) if noc[n]["noc_on_submission_type"] in INNOVATOR_TYPES),
+                     key=lambda n: (noc[n]["noc_date"], str(n)))
+        # keep only the company's CRPs: a generic filing names it as CRP company, or it holds the CRP's NOCs
+        if not (any(is_company(r["noc_crp_company_name"]) for r in refs)
+                or any(is_company(noc[n]["noc_manufacturer_name"]) for n in own)):
+            continue
+        # most common spelling; on a tie, the one in the earliest filing (refs are in date order)
         company = C.Counter(norm(r["noc_crp_company_name"]) for r in refs).most_common(1)[0][0]
         country = C.Counter(norm(r["noc_crp_country_name"]) for r in refs).most_common(1)[0][0]
-
-        # the CRP's own (innovator) NOCs: brand name matches, NDS / SNDS submission
-        own = sorted(
-            (n for n in nocs_by_brand.get(name, ())
-             if noc[n]["noc_on_submission_type"] in INNOVATOR_TYPES and not is_apo(noc[n])),
-            key=lambda n: noc[n]["noc_date"],
-        )
-        apo = sorted((r["noc_number"] for r in refs if is_apo(r)), key=lambda n: noc[n]["noc_date"])
+        gen = [r["noc_number"] for r in refs]  # generic NOCs, oldest first
         generic_makers = {norm(r["noc_manufacturer_name"]) for r in refs}
 
         # product details come from the CRP's own NOCs; fall back to the generics that reference it
-        detail_src = own or [r["noc_number"] for r in refs]
+        detail_src = own or gen
         ings = ingredient_names(detail_src)
         dins, pforms, proutes = set(), set(), set()
         for n in own:
-            for b, din, _, f, rt in products(n):
+            for b, din, *_ in products(n):
                 if norm(b) == name and din:
                     dins.add(din)
         for n in detail_src:
@@ -242,41 +242,34 @@ def build_dataset(d):
                 pforms |= form_by_prod.get(p["noc_br_product_id"], set())
                 proutes |= route_by_prod.get(p["noc_br_product_id"], set())
 
-        same_ing = set()
-        if not apo:
-            same_ing = set(apo_ings.get(frozenset(ings), set()))
-        status = "filed" if apo else ("ingredient" if same_ing else "none")
-        apo_list = apo or sorted(same_ing, key=lambda n: noc[n]["noc_date"])
-
         tclass = next((noc[n]["noc_therapeutic_class"].strip() for n in reversed(own)
                        if noc[n]["noc_therapeutic_class"].strip()), "")
         ptype = C.Counter(noc[n]["noc_product_type"] for n in detail_src).most_common(1)[0][0]
-        apo_brands = sorted({b for n in apo_list for b, *_ in products(n)})
-        apo_dins = sorted({din for n in apo_list for _, din, *_ in products(n) if din})
+        gen_prods = [p for n in gen for p in products(n)]
+        gen_dins = sorted({p[1] for p in gen_prods if p[1]})
+        gen_status = {din_status.get(x, "") for x in gen_dins}
+        status = ("market" if "Marketed" in gen_status else
+                  "approved" if gen_status & {"Approved", "Dormant"} else "none")
 
-        used_nocs.update(own, apo_list)
+        used_nocs.update(own, gen)
         crps.append({
             "n": name, "co": company, "ct": country, "pt": ptype, "tc": tclass,
             "ing": sorted(ings), "fm": sorted(pforms), "rt": sorted(proutes),
-            "din": sorted(dins), "own": own, "apo": apo_list, "st": status,
-            "ab": apo_brands, "ad": apo_dins,
-            "gn": len(refs), "gm": len(generic_makers),
-            "first": refs and min(r["noc_date"] for r in refs),
+            "din": sorted(dins), "own": own, "gen": gen, "st": status,
+            "gb": sorted({p[0] for p in gen_prods}), "gd": gen_dins,
+            "gdm": sorted(x for x in gen_dins if din_status.get(x) == "Marketed"),
+            "gn": len(refs), "gm": len(generic_makers), "gc": sorted(generic_makers),
+            "first": min(r["noc_date"] for r in refs),
         })
 
     nocs_out = {}
     for n in used_nocs:
         r = noc[n]
-        nocs_out[n] = [
-            r["noc_date"], r["noc_manufacturer_name"].strip(), r["noc_on_submission_type"].strip(),
-            r["noc_submission_class"].strip(), r["noc_reason_submission"].strip(),
-            r["noc_reason_supplement"].strip(), r["noc_status_with_conditions"], products(n),
-        ]
+        nocs_out[n] = [r["noc_date"], r["noc_manufacturer_name"].strip(), r["noc_on_submission_type"].strip(),
+                       r["noc_submission_class"].strip(), r["noc_reason_submission"].strip(),
+                       r["noc_reason_supplement"].strip(), r["noc_status_with_conditions"], products(n)]
 
-    # ---- CRP market status from the Drug Product Database (dpd/drugproduct.json + dpd/status.json) ----
-    dpd_prods = load("dpd/drugproduct")
-    dpd_status = {s["drug_code"]: s["status"] for s in load("dpd/status")}
-
+    # ---- CRP market status from the Drug Product Database ----
     by_din, by_name, by_core, by_strip = (C.defaultdict(list) for _ in range(4))
     for p in dpd_prods:
         n = norm(p["brand_name"])
@@ -284,7 +277,11 @@ def build_dataset(d):
         by_name[n].append(p)
         by_core[core(n)].append(p)
         by_strip[stripped(n)].append(p)
-    strip_keys = list(by_strip)
+    strip_keys = sorted(by_strip)
+
+    def same_company(p, c):
+        return (first_word(p["company_name"]) == first_word(c["co"])
+                or (is_company(p["company_name"]) and is_company(c["co"])))
 
     def dpd_match(c):
         """Find the CRP's products in the DPD: by DIN, then brand name, then looser name matches."""
@@ -298,8 +295,7 @@ def build_dataset(d):
                 m = m + (by_name.get(part, []) or by_core.get(core(part), []))
         if not m:
             k = core(c["n"])
-            m = [p for n, ps in by_name.items() if n.startswith(k + " ") for p in ps
-                 if first_word(p["company_name"]) == first_word(c["co"])]
+            m = [p for n, ps in by_name.items() if n.startswith(k + " ") for p in ps if same_company(p, c)]
         if not m:
             m = by_strip.get(stripped(c["n"]), [])
         if not m:
@@ -309,7 +305,7 @@ def build_dataset(d):
                 if cand:
                     m, how = by_strip[cand[0]], "close spelling"
         # a generic-style name can hit several companies: prefer the CRP company's own products
-        same_co = [p for p in m if first_word(p["company_name"]) == first_word(c["co"])]
+        same_co = [p for p in m if same_company(p, c)]
         return (same_co or m), (how if m else "")
 
     for c in crps:
@@ -317,41 +313,47 @@ def build_dataset(d):
         statuses = {dpd_status.get(p["drug_code"], "") for p in m}
         c["ms"] = next((s for s in MARKET_ORDER if s in statuses), "Cancelled" if m else "Not found")
         c["mh"] = how
-        c["mp"] = sorted(
-            {(p["drug_identification_number"], p["brand_name"].strip(), dpd_status.get(p["drug_code"], ""),
-              p["company_name"].strip()) for p in m},
-            key=lambda x: (x[2] != "Marketed", x[0]))[:40]
+        c["mp"] = sorted({(p["drug_identification_number"], p["brand_name"].strip(),
+                           dpd_status.get(p["drug_code"], ""), p["company_name"].strip()) for p in m},
+                         key=lambda x: (x[2] != "Marketed", x[0]))[:40]
         if not c["din"]:  # pre-1994 CRPs have no NOC DINs; use the DPD ones
             c["din"] = sorted({x[0] for x in c["mp"]})
 
     crps.sort(key=lambda c: c["n"])
     latest = max(r["noc_date"] for r in main)
 
-    print("CRP market status", dict(C.Counter(c["ms"] for c in crps)),
-          "| matched by", dict(C.Counter(c["mh"] for c in crps)))
-    st = C.Counter(c["st"] for c in crps)
-    print("inactive NOCs removed", len(inactive), "| crps", len(crps), dict(st), "nocs", len(nocs_out),
-          "no own noc", sum(1 for c in crps if not c["own"]))
-    return {"asOf": latest, "crps": crps, "nocs": nocs_out}
+    # precomputed fields for the page
+    for c in crps:
+        c["hay"] = " ".join([c["n"], c["co"], c["tc"], " ".join(c["ing"]), " ".join(c["din"]), " ".join(c["gb"]),
+                             " ".join(c["gd"]), " ".join(c["gc"])]).lower()
+        c["latest"] = nocs_out[c["own"][-1]][0] if c["own"] else ""
+        c["genLatest"] = nocs_out[c["gen"][-1]][0] if c["gen"] else ""
+    lc = {n: (r[4].lower(), r[5].lower()) for n, r in nocs_out.items()}
+    return {"asOf": latest, "company": COMPANY, "crps": crps, "nocs": nocs_out, "lc": lc}
 
 # COMMAND ----------
 
-data = build_dataset(RAW_DIR)
+SOURCES = ["noticeofcompliancemain", "drugproduct", "medicinalingredient", "dosageform", "route",
+           "dpd/drugproduct", "dpd/status"]
+data = build({k: json.load(open(f"{RAW_DIR}/{k}.json", encoding="utf-8")) for k in SOURCES})
+print(f"{COMPANY} CRPs:", len(data["crps"]), dict(C.Counter(c["st"] for c in data["crps"])),
+      "| CRP market status:", dict(C.Counter(c["ms"] for c in data["crps"])), "| NOCs:", len(data["nocs"]))
 
 # COMMAND ----------
 
 # MAGIC %md
 # MAGIC ## 3. Save as Delta tables
 # MAGIC
-# MAGIC `pm_tracker_crps` has one row per CRP; `pm_tracker_nocs` has one row per NOC referenced by a CRP or Apotex.
-# MAGIC Join them with `explode(crp_nocs)` or `explode(apotex_nocs)` on `noc_number`.
+# MAGIC `pm_tracker_crps` has one row per AstraZeneca CRP; `pm_tracker_nocs` has one row per NOC: the CRP's own NOCs
+# MAGIC and the generic NOCs that reference it. Join them with `explode(crp_nocs)` or `explode(generic_nocs)` on
+# MAGIC `noc_number`.
 
 # COMMAND ----------
 
 from pyspark.sql import functions as F
 from pyspark.sql.types import (ArrayType, IntegerType, LongType, StringType, StructField, StructType)
 
-STATUS_LABEL = {"filed": "Apotex NOC on file", "ingredient": "Same molecule, other CRP", "none": "No Apotex NOC"}
+STATUS_LABEL = {"market": "Generic on market", "approved": "Generic approved, not marketed", "none": "No active generic"}
 strs = ArrayType(StringType())
 
 crp_schema = StructType([
@@ -365,12 +367,14 @@ crp_schema = StructType([
     StructField("routes", strs),
     StructField("crp_dins", strs),
     StructField("crp_nocs", ArrayType(LongType())),
-    StructField("apotex_nocs", ArrayType(LongType())),
-    StructField("apotex_status_code", StringType()),
-    StructField("apotex_status", StringType()),
-    StructField("apotex_brands", strs),
-    StructField("apotex_dins", strs),
-    StructField("generic_nocs", IntegerType()),
+    StructField("generic_nocs", ArrayType(LongType())),
+    StructField("generic_status_code", StringType()),
+    StructField("generic_status", StringType()),
+    StructField("generic_brands", strs),
+    StructField("generic_companies", strs),
+    StructField("generic_dins", strs),
+    StructField("generic_dins_marketed", strs),
+    StructField("generic_noc_count", IntegerType()),
     StructField("generic_filers", IntegerType()),
     StructField("first_generic_noc_date", StringType()),
     StructField("market_status", StringType()),
@@ -381,8 +385,8 @@ crp_schema = StructType([
 ])
 crp_rows = [(
     c["n"], c["co"], c["ct"], c["pt"], c["tc"], c["ing"], c["fm"], c["rt"], c["din"],
-    [int(n) for n in c["own"]], [int(n) for n in c["apo"]], c["st"], STATUS_LABEL[c["st"]],
-    c["ab"], c["ad"], c["gn"], c["gm"], c["first"], c["ms"], c["mh"], [list(p) for p in c["mp"]],
+    [int(n) for n in c["own"]], [int(n) for n in c["gen"]], c["st"], STATUS_LABEL[c["st"]],
+    c["gb"], c["gc"], c["gd"], c["gdm"], c["gn"], c["gm"], c["first"], c["ms"], c["mh"], [list(p) for p in c["mp"]],
 ) for c in data["crps"]]
 
 noc_schema = StructType([
@@ -397,13 +401,14 @@ noc_schema = StructType([
     StructField("products", ArrayType(StructType([
         StructField("brand_name", StringType()), StructField("din", StringType()),
         StructField("ingredients", StringType()), StructField("dosage_form", StringType()),
-        StructField("route", StringType())]))),
+        StructField("route", StringType()), StructField("dpd_status", StringType())]))),
 ])
 noc_rows = [(int(n), *r[:7], [list(p) for p in r[7]]) for n, r in data["nocs"].items()]
 
 as_of = F.to_date(F.lit(data["asOf"]))
 crps_df = (spark.createDataFrame(crp_rows, crp_schema)
            .withColumn("first_generic_noc_date", F.to_date("first_generic_noc_date"))
+           .withColumn("company", F.lit(COMPANY))
            .withColumn("data_as_of", as_of))
 nocs_df = (spark.createDataFrame(noc_rows, noc_schema)
            .withColumn("noc_date", F.to_date("noc_date"))
@@ -419,7 +424,7 @@ print(f"Wrote {crps_df.count():,} rows to {CRPS_TABLE} and {nocs_df.count():,} r
 # MAGIC ## 4. Build and show the tracker page (was `scripts/assemble.py` + `src/template.html`)
 # MAGIC
 # MAGIC The page is the same one that was published on GitHub Pages: filters, status tiles, expandable NOC history and
-# MAGIC "Copy results as table". It is saved to the volume as `pm_update_tracker.html`, so you can download it from
+# MAGIC "Copy results as table". It is saved to the volume as `astrazeneca_pm_update_tracker.html`, so you can download it from
 # MAGIC Catalog Explorer and share it, and it is shown in the cell below.
 
 # COMMAND ----------
@@ -487,9 +492,9 @@ header p { margin: 4px 0 0; color: var(--muted); max-width: 72ch; }
 .stat .v { font: 600 24px/1.1 var(--font-display); font-variant-numeric: tabular-nums; }
 .stat .s { font-size: 12px; color: var(--muted); }
 .stat.all { border-left-color: var(--accent); }
-.stat.filed { border-left-color: var(--ok); }
-.stat.ingredient { border-left-color: var(--warn); }
-.stat.none { border-left-color: var(--no); }
+.stat.market { border-left-color: var(--no); }
+.stat.approved { border-left-color: var(--warn); }
+.stat.none { border-left-color: var(--ok); }
 .bar { display: flex; height: 6px; border-radius: 3px; overflow: hidden; background: var(--sunken); gap: 2px; }
 .bar span { display: block; }
 
@@ -531,9 +536,9 @@ tr.open .caret { transform: rotate(90deg); }
 .dins { display: flex; flex-wrap: wrap; gap: 3px 8px; font-family: var(--font-data); font-size: 12px; }
 .num { font-family: var(--font-data); font-variant-numeric: tabular-nums; }
 .pill { display: inline-block; font-size: 12px; font-weight: 600; padding: 3px 9px; border-radius: 999px; white-space: nowrap; }
-.pill.filed { background: var(--ok-soft); color: var(--ok); }
-.pill.ingredient { background: var(--warn-soft); color: var(--warn); }
-.pill.none { background: var(--no-soft); color: var(--no); }
+.pill.market { background: var(--no-soft); color: var(--no); }
+.pill.approved { background: var(--warn-soft); color: var(--warn); }
+.pill.none { background: var(--ok-soft); color: var(--ok); }
 .mk { display: inline-flex; align-items: center; gap: 5px; font-size: 12px; font-weight: 500; margin-top: 4px; }
 .mk::before { content: ""; width: 7px; height: 7px; border-radius: 50%; background: currentColor; }
 .mk.Marketed { color: var(--ok); }
@@ -573,18 +578,18 @@ tr.detail > td { background: var(--bg); padding: 16px 16px 20px; }
   <header>
     <div>
       <h1>PM Update Tracker</h1>
-      <p>Every Canadian Reference Product (CRP) named in a generic submission, with its own NOCs, DINs and product details, set against Apotex's NOCs for the same product.</p>
+      <p>Every <span class="co"></span> product named as the Canadian Reference Product (CRP) in a generic submission, with its own NOCs, DINs and product details, set against the generic products filed against it.</p>
     </div>
-    <div class="src">Source: Health Canada Notice of Compliance API<br>Data current to <span class="mono" id="asof"></span></div>
+    <div class="src">Source: Health Canada NOC and Drug Product Database<br>Data current to <span class="mono" id="asof"></span></div>
   </header>
 
-  <section class="summary" id="summary" aria-label="Apotex filing status"></section>
+  <section class="summary" id="summary" aria-label="Generic status"></section>
 
   <section class="filters" aria-label="Filters">
     <div class="field">
       <label for="q">Search products</label>
-      <input id="q" type="search" placeholder="CRP name, ingredient, company, DIN or APO- brand" autocomplete="off">
-      <span class="hint">Searches CRP name, company, ingredients, therapeutic class, DINs and Apotex brands.</span>
+      <input id="q" type="search" placeholder="CRP name, ingredient, DIN, generic brand or company" autocomplete="off">
+      <span class="hint">Searches CRP name, ingredients, therapeutic class, DINs, and generic brands, DINs and companies.</span>
     </div>
     <div class="field">
       <label for="rsub">Reason for submission</label>
@@ -600,9 +605,9 @@ tr.detail > td { background: var(--bg); padding: 16px 16px 20px; }
       <div class="field">
         <label for="scope">Apply reason filters to</label>
         <select id="scope">
-          <option value="both">CRP and Apotex NOCs</option>
+          <option value="both">CRP and generic NOCs</option>
           <option value="crp">CRP NOCs only</option>
-          <option value="apo">Apotex NOCs only</option>
+          <option value="gen">Generic NOCs only</option>
         </select>
       </div>
       <div class="field">
@@ -626,8 +631,8 @@ tr.detail > td { background: var(--bg); padding: 16px 16px 20px; }
           <option value="name">CRP name, A to Z</option>
           <option value="filers">Most generic filers</option>
           <option value="latest">Latest CRP NOC</option>
-          <option value="apolatest">Latest Apotex NOC</option>
-          <option value="gap">Unfiled first, most filers</option>
+          <option value="genlatest">Latest generic NOC</option>
+          <option value="gap">Generic on market first, most filers</option>
         </select>
       </div>
       <button class="btn" id="reset" type="button">Clear filters</button>
@@ -650,8 +655,8 @@ tr.detail > td { background: var(--bg); padding: 16px 16px 20px; }
           <th style="width:22%">Product details</th>
           <th style="width:17%">CRP NOC / DIN</th>
           <th style="width:9%">Generic filers</th>
-          <th style="width:22%">Apotex product</th>
-          <th style="width:13%">Apotex status</th>
+          <th style="width:22%">Generic products</th>
+          <th style="width:13%">Generic status</th>
         </tr></thead>
         <tbody id="rows"></tbody>
       </table>
@@ -663,8 +668,9 @@ tr.detail > td { background: var(--bg); padding: 16px 16px 20px; }
   </section>
 
   <section class="note">
-    <p><b>How status is set.</b> <i>Apotex NOC on file</i>: Apotex holds at least one NOC whose submission names this product as its CRP. <i>Same molecule, other CRP</i>: no Apotex NOC names this CRP, but Apotex holds a NOC for a product with exactly the same medicinal ingredients (for example one filed against an older or foreign reference). <i>No Apotex NOC</i>: neither applies.</p>
-    <p><b>CRP market status</b> comes from Health Canada's Drug Product Database (DPD). A CRP is active when at least one of its DINs is currently marketed. Products are matched by DIN first, then by brand name, then by close spelling to catch typos in the CRP names filed with generic submissions. Where a name matches several companies, the CRP company's own products are used. CRPs with no match are listed under "Not found in Drug Product Database". Inactive NOC records are excluded throughout.</p>
+    <p><b>Which products are listed.</b> A CRP is listed when a generic submission names <span class="co"></span> (or a predecessor such as Astra Pharma or Zeneca Pharma, allowing for typos) as the CRP company, or when <span class="co"></span> holds the CRP's own NOCs. Generic filers often misspell the CRP name, so one product can appear under several spellings.</p>
+    <p><b>Generic status</b> uses the current Drug Product Database (DPD) status of the DINs in the generic NOCs that name the CRP. <i>Generic on market</i>: at least one generic DIN is marketed. <i>Generic approved, not marketed</i>: none is marketed, but at least one is approved or dormant. <i>No active generic</i>: every generic DIN is cancelled or not in the DPD.</p>
+    <p><b>CRP market status</b> also comes from the DPD. A CRP is active when at least one of its DINs is currently marketed. Products are matched by DIN first, then by brand name, then by close spelling to catch typos in the CRP names filed with generic submissions. Where a name matches several companies, the CRP company's own products are used. CRPs with no match are listed under "Not found in Drug Product Database". Inactive NOC records are excluded throughout.</p>
     <p><b>Limits.</b> The NOC database lists approved submissions only, so filings still under review do not appear. CRP NOCs are matched by brand name on New Drug Submissions and their supplements. Products approved before 1994 often have no NOC record, and their details are taken from the generic NOCs that reference them.</p>
   </section>
 </div>
@@ -673,26 +679,30 @@ tr.detail > td { background: var(--bg); padding: 16px 16px 20px; }
 <script>
 (() => {
   const D = JSON.parse(document.getElementById('data').textContent);
-  const NOC = D.nocs; // n -> [date, maker, subType, subClass, reasonSub, reasonSupp, conditions, products[[brand,din,ings,form,route]]]
+  const NOC = D.nocs; // n -> [date, maker, subType, subClass, reasonSub, reasonSupp, conditions, products[[brand,din,ings,form,route,dpdStatus]]]
   const CRPS = D.crps;
   const STATUS = {
-    filed: 'Apotex NOC on file',
-    ingredient: 'Same molecule, other CRP',
-    none: 'No Apotex NOC'
+    market: 'Generic on market',
+    approved: 'Generic approved, not marketed',
+    none: 'No active generic'
   };
+  document.querySelectorAll('.co').forEach(e => e.textContent = D.company);
+  document.title = `${D.company} PM Update Tracker`;
+  document.querySelector('h1').textContent = document.title;
   const MARKET = {
     Marketed: 'Active (marketed)', Approved: 'Approved, not marketed', Dormant: 'Dormant',
     Cancelled: 'Cancelled', 'Not found': 'Not found in DPD'
   };
   const PAGE = 50;
+  const dpdClass = s => ['Marketed', 'Approved', 'Dormant'].includes(s) ? s : 'Cancelled';
   const $ = id => document.getElementById(id);
   const esc = s => String(s ?? '').replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
 
   // precompute lowercase search haystacks
   for (const c of CRPS) {
-    c.hay = [c.n, c.co, c.tc, c.ing.join(' '), c.din.join(' '), c.ab.join(' '), c.ad.join(' ')].join(' ').toLowerCase();
+    c.hay = [c.n, c.co, c.tc, c.ing.join(' '), c.din.join(' '), c.gb.join(' '), c.gd.join(' '), c.gc.join(' ')].join(' ').toLowerCase();
     c.latest = c.own.length ? NOC[c.own[c.own.length - 1]][0] : '';
-    c.apoLatest = c.apo.length ? NOC[c.apo[c.apo.length - 1]][0] : '';
+    c.genLatest = c.gen.length ? NOC[c.gen[c.gen.length - 1]][0] : '';
   }
   const lc = {};
   for (const n in NOC) lc[n] = [NOC[n][4].toLowerCase(), NOC[n][5].toLowerCase()];
@@ -738,7 +748,7 @@ tr.detail > td { background: var(--bg); padding: 16px 16px 20px; }
   let view = [], qSub = [], qSupp = [], qText = [];
 
   function nocPool(c, scope) {
-    return scope === 'crp' ? c.own : scope === 'apo' ? c.apo : c.own.concat(c.apo);
+    return scope === 'crp' ? c.own : scope === 'gen' ? c.gen : c.own.concat(c.gen);
   }
   function filterBase() {
     qText = parse($('q').value.replace(/,/g, ' '));
@@ -760,12 +770,12 @@ tr.detail > td { background: var(--bg); padding: 16px 16px 20px; }
     name: (a, b) => a.n.localeCompare(b.n),
     filers: (a, b) => b.gm - a.gm || a.n.localeCompare(b.n),
     latest: (a, b) => b.latest.localeCompare(a.latest) || a.n.localeCompare(b.n),
-    apolatest: (a, b) => b.apoLatest.localeCompare(a.apoLatest) || a.n.localeCompare(b.n),
-    gap: (a, b) => (a.st === 'none' ? 0 : a.st === 'ingredient' ? 1 : 2) - (b.st === 'none' ? 0 : b.st === 'ingredient' ? 1 : 2) || b.gm - a.gm
+    genlatest: (a, b) => b.genLatest.localeCompare(a.genLatest) || a.n.localeCompare(b.n),
+    gap: (a, b) => (a.st === 'market' ? 0 : a.st === 'approved' ? 1 : 2) - (b.st === 'market' ? 0 : b.st === 'approved' ? 1 : 2) || b.gm - a.gm
   };
 
   function renderSummary(base) {
-    const cnt = { filed: 0, ingredient: 0, none: 0 };
+    const cnt = { market: 0, approved: 0, none: 0 };
     base.forEach(c => cnt[c.st]++);
     const tot = base.length || 1;
     const pct = k => Math.round(cnt[k] / tot * 100);
@@ -773,9 +783,9 @@ tr.detail > td { background: var(--bg); padding: 16px 16px 20px; }
       <span class="k">${label}</span><span class="v">${v.toLocaleString()}</span><span class="s">${sub}</span></button>`;
     $('summary').innerHTML =
       tile('', 'CRP products', base.length, `<span class="bar" aria-hidden="true">
-        <span style="width:${pct('filed')}%;background:var(--ok)"></span><span style="width:${pct('ingredient')}%;background:var(--warn)"></span><span style="width:${pct('none')}%;background:var(--no)"></span></span>`) +
-      tile('filed', STATUS.filed, cnt.filed, `${pct('filed')}% of CRPs shown`) +
-      tile('ingredient', STATUS.ingredient, cnt.ingredient, `${pct('ingredient')}% of CRPs shown`) +
+        <span style="width:${pct('market')}%;background:var(--no)"></span><span style="width:${pct('approved')}%;background:var(--warn)"></span><span style="width:${pct('none')}%;background:var(--ok)"></span></span>`) +
+      tile('market', STATUS.market, cnt.market, `${pct('market')}% of CRPs shown`) +
+      tile('approved', STATUS.approved, cnt.approved, `${pct('approved')}% of CRPs shown`) +
       tile('none', STATUS.none, cnt.none, `${pct('none')}% of CRPs shown`);
   }
 
@@ -784,7 +794,7 @@ tr.detail > td { background: var(--bg); padding: 16px 16px 20px; }
   function rowHtml(c) {
     const terms = allTerms(qText);
     const lastOwn = c.own.length ? c.own[c.own.length - 1] : null;
-    const lastApo = c.apo.length ? c.apo[c.apo.length - 1] : null;
+    const lastGen = c.gen.length ? c.gen[c.gen.length - 1] : null;
     const open = state.open.has(c.n);
     const details = [c.fm.join(', '), c.rt.join(', ')].filter(Boolean).join(' · ');
     return `<tr class="crp${open ? ' open' : ''}" data-n="${esc(c.n)}" tabindex="0" aria-expanded="${open}">
@@ -797,10 +807,10 @@ tr.detail > td { background: var(--bg); padding: 16px 16px 20px; }
       <td>${lastOwn ? `<div><span class="num">NOC ${lastOwn}</span> <span class="sub">${NOC[lastOwn][0]}</span></div>
         <div class="sub">${c.own.length} NOC${c.own.length > 1 ? 's' : ''} on record</div>` : '<div class="sub">No CRP NOC on record (pre-1994 or foreign)</div>'}
         ${c.din.length ? `<div class="dins">${more(c.din, 4, d => `<span>${hl(d, terms)}</span>`)}</div>` : ''}</td>
-      <td><div class="num">${c.gm}</div><div class="sub">${c.gn} generic NOCs</div></td>
-      <td>${c.ab.length ? `<div class="ing">${more(c.ab, 2, b => `<div>${hl(b, terms)}</div>`)}</div>` : '<div class="sub">—</div>'}
-        ${lastApo ? `<div class="sub"><span class="num">NOC ${lastApo}</span> · ${NOC[lastApo][0]} · ${c.apo.length} NOC${c.apo.length > 1 ? 's' : ''}</div>` : ''}
-        ${c.ad.length ? `<div class="dins">${more(c.ad, 4, d => `<span>${hl(d, terms)}</span>`)}</div>` : ''}</td>
+      <td><div class="num">${c.gm}</div><div class="sub">${c.gn} generic NOC${c.gn === 1 ? '' : 's'}</div></td>
+      <td>${c.gb.length ? `<div class="ing">${more(c.gb, 2, b => `<div>${hl(b, terms)}</div>`)}</div>` : '<div class="sub">—</div>'}
+        ${lastGen ? `<div class="sub">Latest <span class="num">NOC ${lastGen}</span> · ${NOC[lastGen][0]}</div>` : ''}
+        <div class="sub">${c.gdm.length} of ${c.gd.length} generic DIN${c.gd.length === 1 ? '' : 's'} marketed</div></td>
       <td><span class="pill ${c.st}">${STATUS[c.st]}</span></td>
     </tr>${open ? detailHtml(c) : ''}`;
   }
@@ -812,7 +822,7 @@ tr.detail > td { background: var(--bg); padding: 16px 16px 20px; }
     const rows = list.slice().reverse().map(n => {
       const r = NOC[n];
       const hit = active && ((qSub.length && matches(lc[n][0], qSub)) || (qSupp.length && matches(lc[n][1], qSupp)));
-      const prods = r[7].length ? r[7].map(p => `<div>${esc(p[0])} · <span class="num">${p[1] || 'no DIN'}</span> · ${esc(p[2] || '')}${p[3] ? ' · ' + esc(p[3]) : ''}</div>`).join('') : '<span class="muted">—</span>';
+      const prods = r[7].length ? r[7].map(p => `<div>${esc(p[0])} · <span class="num">${p[1] || 'no DIN'}</span> · ${esc(p[2] || '')}${p[3] ? ' · ' + esc(p[3]) : ''}${p[5] ? ` · <span class="mk ${dpdClass(p[5])}">${esc(p[5])}</span>` : ''}</div>`).join('') : '<span class="muted">—</span>';
       return `<tr class="${active ? (hit ? 'hit' : 'dim') : ''}">
         <td class="num">${n}</td><td class="num" style="white-space:nowrap">${r[0]}</td>
         <td>${esc(r[2])}<div class="sub">${esc(r[3])}${r[6] === 'Y' ? ' · with conditions' : ''}</div><div class="sub">${esc(r[1])}</div></td>
@@ -825,20 +835,20 @@ tr.detail > td { background: var(--bg); padding: 16px 16px 20px; }
 
   function detailHtml(c) {
     const scope = $('scope').value;
-    const apoTitle = c.st === 'ingredient' ? 'Apotex NOCs for the same ingredients (filed against another CRP)' : 'Apotex NOCs referencing this CRP';
     return `<tr class="detail"><td colspan="6"><div class="detail-grid">
       <div class="detail-head">
         <span><b>CRP company</b> ${esc(c.co)}${c.ct ? ' (' + esc(c.ct) + ')' : ''}</span>
         <span><b>CRP DINs</b> <span class="mono">${c.din.length ? esc(c.din.join(', ')) : 'none on record'}</span></span>
-        <span><b>Apotex DINs</b> <span class="mono">${c.ad.length ? esc(c.ad.join(', ')) : 'none'}</span></span>
+        <span><b>Generic DINs marketed</b> <span class="mono">${c.gdm.length ? esc(c.gdm.join(', ')) : 'none'}</span></span>
         <span><b>First generic NOC</b> <span class="mono">${esc(c.first)}</span></span>
       </div>
+      <div class="detail-head"><span><b>Generic companies (${c.gc.length})</b> ${esc(c.gc.join(' · '))}</span></div>
       <div><div class="sec-title"><h2>CRP in the Drug Product Database</h2><span class="hint">${c.mp.length ? 'Matched by ' + esc(c.mh) : 'No matching product found'}</span></div>
         ${c.mp.length ? `<div style="overflow-x:auto"><table class="nocs"><thead><tr><th>DIN</th><th>Brand name</th><th>Current status</th><th>Company</th></tr></thead><tbody>${
-          c.mp.map(p => `<tr><td class="num">${esc(p[0])}</td><td>${esc(p[1])}</td><td><span class="mk ${p[2] === 'Marketed' ? 'Marketed' : p[2] === 'Approved' ? 'Approved' : p[2] === 'Dormant' ? 'Dormant' : 'Cancelled'}">${esc(p[2])}</span></td><td>${esc(p[3])}</td></tr>`).join('')
+          c.mp.map(p => `<tr><td class="num">${esc(p[0])}</td><td>${esc(p[1])}</td><td><span class="mk ${dpdClass(p[2])}">${esc(p[2])}</span></td><td>${esc(p[3])}</td></tr>`).join('')
         }</tbody></table></div>` : '<div class="sub">The CRP name did not match any DIN or brand name in the DPD.</div>'}</div>
-      <div><div class="sec-title"><h2>CRP NOCs</h2><span class="hint">${c.own.length} on record, newest first</span></div>${nocTable(c.own, scope !== 'apo')}</div>
-      <div><div class="sec-title"><h2>${apoTitle}</h2><span class="hint">${c.apo.length} on record, newest first</span></div>${nocTable(c.apo, scope !== 'crp')}</div>
+      <div><div class="sec-title"><h2>CRP NOCs</h2><span class="hint">${c.own.length} on record, newest first</span></div>${nocTable(c.own, scope !== 'gen')}</div>
+      <div><div class="sec-title"><h2>Generic NOCs referencing this CRP</h2><span class="hint">${c.gen.length} on record, newest first · DIN status from the DPD</span></div>${nocTable(c.gen, scope !== 'crp')}</div>
     </div></td></tr>`;
   }
 
@@ -890,9 +900,9 @@ tr.detail > td { background: var(--bg); padding: 16px 16px 20px; }
     state.status = ''; state.open.clear(); update();
   });
   $('copy').addEventListener('click', () => {
-    const head = ['CRP product', 'CRP company', 'Ingredients', 'Dosage form', 'Route', 'Product type', 'CRP market status', 'CRP NOCs', 'Latest CRP NOC', 'CRP DINs', 'Generic filers', 'Apotex brands', 'Apotex NOCs', 'Apotex DINs', 'Apotex status'];
+    const head = ['CRP product', 'CRP company', 'Ingredients', 'Dosage form', 'Route', 'Product type', 'CRP market status', 'CRP NOCs', 'Latest CRP NOC', 'CRP DINs', 'Generic filers', 'Generic companies', 'Generic brands', 'Generic NOCs', 'Latest generic NOC', 'Generic DINs', 'Generic DINs marketed', 'Generic status'];
     const lines = [head.join('\t')].concat(view.map(c => [c.n, c.co, c.ing.join(' + '), c.fm.join(', '), c.rt.join(', '), c.pt, MARKET[c.ms],
-      c.own.join(' '), c.latest, c.din.join(' '), c.gm, c.ab.join(', '), c.apo.join(' '), c.ad.join(' '), STATUS[c.st]].join('\t')));
+      c.own.join(' '), c.latest, c.din.join(' '), c.gm, c.gc.join('; '), c.gb.join(', '), c.gen.join(' '), c.genLatest, c.gd.join(' '), c.gdm.join(' '), STATUS[c.st]].join('\t')));
     const text = lines.join('\n');
     const done = msg => { $('copymsg').textContent = msg; setTimeout(() => $('copymsg').textContent = '', 3000); };
     try {
@@ -907,7 +917,9 @@ tr.detail > td { background: var(--bg); padding: 16px 16px 20px; }
 
 
 def assemble_page(data):
-    payload = json.dumps(data, separators=(",", ":"), ensure_ascii=False).replace("</", r"<\/")  # keep </script> out
+    page = {"asOf": data["asOf"], "company": data["company"], "nocs": data["nocs"],
+            "crps": [{k: v for k, v in c.items() if k not in ("hay", "latest", "genLatest")} for c in data["crps"]]}
+    payload = json.dumps(page, separators=(",", ":"), ensure_ascii=False).replace("</", r"<\/")  # keep </script> out
     head = '<!doctype html>\n<meta charset="utf-8">\n<meta name="viewport" content="width=device-width, initial-scale=1">\n'
     return head + TEMPLATE_HTML.replace("__DATA__", payload)
 
