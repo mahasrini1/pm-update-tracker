@@ -1,0 +1,54 @@
+name: Refresh data and publish tracker
+
+on:
+  push:
+    branches: [main]
+  schedule:
+    - cron: "0 9 * * *" # every day at 09:00 UTC (4-5 am Toronto), after Health Canada's nightly refresh
+  workflow_dispatch: # allows a manual run from the Actions tab
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Download Health Canada NOC and DPD data
+        run: python scripts/fetch_data.py raw
+
+      - name: Build tracker data
+        run: python scripts/build.py raw data.json
+
+      - name: Assemble page
+        run: |
+          mkdir -p site
+          python scripts/assemble.py src/template.html data.json site/index.html
+
+      - uses: actions/configure-pages@v5
+
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: site
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4

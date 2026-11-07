@@ -1,0 +1,7 @@
+# downloaded Health Canada data (re-created by scripts/fetch_data.py)
+raw/
+# build outputs
+data.json
+site/
+pm-update-tracker.html
+__pycache__/
