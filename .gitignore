@@ -2,6 +2,5 @@
 raw/
 # build outputs
 data.json
-site/
 pm-update-tracker.html
 __pycache__/
