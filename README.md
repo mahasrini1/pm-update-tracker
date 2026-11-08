@@ -4,6 +4,10 @@ A web page that lists every AstraZeneca product named as the Canadian Reference 
 
 The data is rebuilt from Health Canada's public APIs every night and published with GitHub Pages. The same tracker can also run in Databricks, as a notebook or as a Streamlit app (see [Databricks](#databricks)).
 
+**Live page:** https://mahasrini1.github.io/pm-update-tracker/ · **Built page in this repo:** [`site/index.html`](site/index.html)
+
+![AstraZeneca PM Update Tracker](docs/screenshot.png)
+
 ## What the page shows
 
 For each AstraZeneca CRP:
